@@ -68,7 +68,7 @@ PUTCHAR_PROTOTYPE
 
 rfm95_handle_t rfm95_handle = {
 	.spi_handle = &hspi1,
-	.nss_pin = GPIO_PIN_6,
+	.nss_pin = GPIO_PIN_0,
 	.nss_port = GPIOB,
 	.nrst_pin = GPIO_PIN_9,
 	.nrst_port = GPIOC,
@@ -114,49 +114,40 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
-  uint8_t transmit_buffer = 0x11;
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+  uint8_t transmit_buffer = 0x42;
   char buffer[20];
 
   HAL_SPI_Transmit(&hspi1, &transmit_buffer, 1, RFM95_SPI_TIMEOUT);
 
   HAL_SPI_Receive(&hspi1, (uint8_t*)buffer, 1, RFM95_SPI_TIMEOUT);
 
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
-
-  HAL_UART_Transmit(&huart2, (uint8_t*)buffer, sizeof(buffer), 10);
-  HAL_Delay(1000);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
 
 	  // Initialise RFM95 module.
   if (!rfm95_init(&rfm95_handle, &huart2)) {
-	  uint8_t init_message_fail[] = "RFM95 init failed\n\r";
-	  HAL_UART_Transmit(&huart2, init_message_fail, sizeof(init_message_fail), 10);
-	  HAL_Delay(1000);
+
   } else {
 	  uint8_t init_message_success[] = "RFM95 init success\n\r";
 	  HAL_UART_Transmit(&huart2, init_message_success, sizeof(init_message_success), 10);
 	  HAL_Delay(1000);
   }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  uint8_t data_packet[] = {
-		  0x01, 0x02, 0x03, 0x4
-	  };
+	uint8_t payloadBuff;
+	size_t payload_len;
 
-	  if (!rfm95_send_receive_cycle(&rfm95_handle, data_packet, sizeof(data_packet))) {
-		  uint8_t send_message_failed[] = "RFM95 send failed\n\r";
-		  HAL_UART_Transmit(&huart2, send_message_failed, sizeof(send_message_failed), 10);
-		  HAL_Delay(1000);
-	  } else {
-		  uint8_t send_message_success[] = "RFM95 send failed\n\r";
-		  HAL_UART_Transmit(&huart2, send_message_success, sizeof(send_message_success), 10);
-		  HAL_Delay(1000);
-	  }
+	if(receive_package(&rfm95_handle, &payloadBuff, &payload_len, 0, &huart2)) {
+		//HAL_UART_Transmit(&huart2, payloadBuff, sizeof(payloadBuff), 10);
 
+		HAL_UART_Transmit(&huart2, "\nhere2\n", 7, 10);
+		HAL_Delay(100);
+	}
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -285,14 +276,21 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(SPI_NSS_GPIO_Port, SPI_NSS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7|GPIO_PIN_9, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SPI_NSS_GPIO_Port, SPI_NSS_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin : SPI_NSS_Pin */
+  GPIO_InitStruct.Pin = SPI_NSS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(SPI_NSS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PC7 PC9 */
   GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_9;
@@ -306,13 +304,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : SPI_NSS_Pin */
-  GPIO_InitStruct.Pin = SPI_NSS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SPI_NSS_GPIO_Port, &GPIO_InitStruct);
 
 }
 
