@@ -23,6 +23,8 @@
     defined (STM32F479xx) || defined (STM32F412Cx) || defined (STM32F412Rx) || defined (STM32F412Vx) || \
     defined (STM32F412Zx) || defined (STM32F413xx) || defined (STM32F423xx)
 #include "stm32f4xx_hal.h"
+#elif defined (STM32F0xx) || defined (STM32F030x8)
+#include "stm32f0xx_hal.h"
 #elif defined (TESTING)
 #include "testing/mock_hal.h"
 #else
@@ -224,10 +226,12 @@ typedef struct {
 
 } rfm95_handle_t;
 
-bool rfm95_init(rfm95_handle_t *handle);
+bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle);
 
 bool rfm95_set_power(rfm95_handle_t *handle, int8_t power);
 
 bool rfm95_send_receive_cycle(rfm95_handle_t *handle, const uint8_t *send_data, size_t send_data_length);
+
+bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *payload_len, int8_t *snr, UART_HandleTypeDef *uart_handle);
 
 void rfm95_on_interrupt(rfm95_handle_t *handle, rfm95_interrupt_t interrupt);

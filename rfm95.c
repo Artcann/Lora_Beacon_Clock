@@ -6,6 +6,8 @@
 
 #define RFM9x_VER 0x12
 
+uint8_t irqFlags;
+
 /**
  * Registers addresses.
  */
@@ -56,6 +58,7 @@ typedef struct
 #define RFM95_REGISTER_OP_MODE_LORA_SLEEP                       0x80
 #define RFM95_REGISTER_OP_MODE_LORA_STANDBY                     0x81
 #define RFM95_REGISTER_OP_MODE_LORA_TX                          0x83
+#define RFM95_REGISTER_OP_MODE_RX_CONTINUOUS					0x85
 #define RFM95_REGISTER_OP_MODE_LORA_RX_SINGLE                   0x86
 
 #define RFM95_REGISTER_PA_DAC_LOW_POWER                         0x84
@@ -121,6 +124,7 @@ static void config_load_default(rfm95_handle_t *handle)
 	config_set_channel(handle, 0, 868100000);
 	config_set_channel(handle, 1, 868300000);
 	config_set_channel(handle, 2, 868500000);
+	config_set_channel(handle, 3, 867100000);
 }
 
 static void reset(rfm95_handle_t *handle)
@@ -162,20 +166,6 @@ static bool wait_for_irq(rfm95_handle_t *handle, rfm95_interrupt_t interrupt, ui
 	return true;
 }
 
-static bool wait_for_rx_irqs(rfm95_handle_t *handle)
-{
-	uint32_t timeout_tick = handle->get_precision_tick() +
-	                        RFM95_RECEIVE_TIMEOUT * handle->precision_tick_frequency / 1000;
-
-	while (handle->interrupt_times[RFM95_INTERRUPT_DIO0] == 0 && handle->interrupt_times[RFM95_INTERRUPT_DIO1] == 0) {
-		if (handle->get_precision_tick() >= timeout_tick) {
-			return false;
-		}
-	}
-
-	return handle->interrupt_times[RFM95_INTERRUPT_DIO0] != 0;
-}
-
 bool rfm95_set_power(rfm95_handle_t *handle, int8_t power)
 {
 	assert((power >= 2 && power <= 17) || power == 20);
@@ -202,19 +192,18 @@ bool rfm95_set_power(rfm95_handle_t *handle, int8_t power)
 	return true;
 }
 
-bool rfm95_init(rfm95_handle_t *handle)
+bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 {
+
 	assert(handle->spi_handle->Init.Mode == SPI_MODE_MASTER);
 	assert(handle->spi_handle->Init.Direction == SPI_DIRECTION_2LINES);
 	assert(handle->spi_handle->Init.DataSize == SPI_DATASIZE_8BIT);
 	assert(handle->spi_handle->Init.CLKPolarity == SPI_POLARITY_LOW);
 	assert(handle->spi_handle->Init.CLKPhase == SPI_PHASE_1EDGE);
-	assert(handle->get_precision_tick != NULL);
-	assert(handle->random_int != NULL);
-	assert(handle->precision_sleep_until != NULL);
-	assert(handle->precision_tick_frequency > 10000);
 
 	reset(handle);
+
+
 
 	// If there is reload function or the reload was unsuccessful or the magic does not match restore default.
 	if (handle->reload_config == NULL || !handle->reload_config(&handle->config) ||
@@ -225,7 +214,10 @@ bool rfm95_init(rfm95_handle_t *handle)
 	// Check for correct version.
 	uint8_t version;
 	if (!read_register(handle, RFM95_REGISTER_VERSION, &version, 1)) return false;
+	HAL_UART_Transmit(uart_handle, version, sizeof(version), 10);
+	HAL_Delay(100);
 	if (version != RFM9x_VER) return false;
+
 
 	// Module must be placed in sleep mode before switching to lora.
 	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_SLEEP)) return false;
@@ -264,145 +256,7 @@ bool rfm95_init(rfm95_handle_t *handle)
 	return true;
 }
 
-static bool process_mac_commands(rfm95_handle_t *handle, const uint8_t *frame_payload,
-                                 size_t frame_payload_length, uint8_t answer_buffer[51], uint8_t *answer_buffer_length,
-                                 int8_t snr)
-{
-	uint8_t index = 0;
-	uint8_t answer_index = 0;
-
-	while (index < frame_payload_length) {
-		switch (frame_payload[index++])
-		{
-			case 0x01: // ResetConf
-			{
-				if (index >= frame_payload_length) return false;
-
-				index += 1;
-				break;
-			}
-			case 0x02: // LinkCheckReq
-			{
-				if ((index + 1) >= frame_payload_length) return false;
-
-				index += 2;
-				break;
-			}
-			case 0x03: // LinkADRReq
-			{
-				if ((index + 3) >= frame_payload_length) return false;
-
-				index += 4;
-				break;
-			}
-			case 0x04: // DutyCycleReq
-			{
-				if (index >= frame_payload_length) return false;
-
-				index += 1;
-				break;
-			}
-			case 0x05: // RXParamSetupReq
-			{
-				if ((index + 4) >= frame_payload_length) return false;
-				if ((answer_index + 2) >= 51) return false;
-
-				uint8_t dl_settings = frame_payload[index++];
-				uint8_t frequency_lsb = frame_payload[index++];
-				uint8_t frequency_msb = frame_payload[index++];
-				uint8_t frequency_hsb = frame_payload[index++];
-				uint32_t frequency = (frequency_lsb | (frequency_msb << 8) | (frequency_hsb << 16)) * 100;
-
-				answer_buffer[answer_index++] = 0x05;
-				answer_buffer[answer_index++] = 0b0000111;
-				break;
-			}
-			case 0x06: // DevStatusReq
-			{
-				if ((answer_index + 3) >= 51) return false;
-
-				uint8_t margin = (uint8_t)(snr & 0x1f);
-				uint8_t battery_level = handle->get_battery_level == NULL ? 0xff : handle->get_battery_level();
-
-				answer_buffer[answer_index++] = 0x06;
-				answer_buffer[answer_index++] = battery_level;
-				answer_buffer[answer_index++] = margin;
-				break;
-			}
-			case 0x07: // NewChannelReq
-			{
-				if ((index + 4) >= frame_payload_length) return false;
-				if ((answer_index + 2) >= 51) return false;
-
-				uint8_t channel_index = frame_payload[index++];
-				uint8_t frequency_lsb = frame_payload[index++];
-				uint8_t frequency_msb = frame_payload[index++];
-				uint8_t frequency_hsb = frame_payload[index++];
-				uint8_t min_max_dr = frame_payload[index++];
-
-				uint32_t frequency = (frequency_lsb | (frequency_msb << 8) | (frequency_hsb << 16)) * 100;
-				uint8_t min_dr = min_max_dr & 0x0f;
-				uint8_t max_dr = (min_max_dr >> 4) & 0x0f;
-
-				if (channel_index >= 3) {
-					config_set_channel(handle, channel_index, frequency);
-				}
-
-				bool dr_supports_125kHz_SF7 = min_dr <= 5 || max_dr >= 5;
-
-				answer_buffer[answer_index++] = 0x07;
-				answer_buffer[answer_index++] = 0x01 | (dr_supports_125kHz_SF7 << 1);
-				break;
-			}
-			case 0x08: // RXTimingSetupReq
-			{
-				if (index >= frame_payload_length) return false;
-				if ((answer_index + 2) >= 51) return false;
-
-				handle->config.rx1_delay = frame_payload[index++] & 0xf;
-				if (handle->config.rx1_delay == 0) {
-					handle->config.rx1_delay = 1;
-				}
-
-				answer_buffer[answer_index++] = 0x08;
-				break;
-			}
-			case 0x09: // TxParamSetupReq
-			{
-				if (index >= frame_payload_length) return false;
-
-				break;
-			}
-			case 0x0a: // DlChannelReq
-			{
-				if ((index + 4) >= frame_payload_length) return false;
-
-				break;
-			}
-			case 0x0b: // RekeyConf
-			{
-				if (index >= frame_payload_length) return false;
-
-				break;
-			}
-			case 0x0c: // ADRParamSetupReq
-			{
-				if (index >= frame_payload_length) return false;
-
-				break;
-			}
-			case 0x0d: // DeviceTimeReq
-			{
-				break;
-			}
-		}
-	}
-
-	*answer_buffer_length = answer_index;
-	return true;
-}
-
-static bool receive_at_scheduled_time(rfm95_handle_t *handle, uint32_t scheduled_time)
+bool receive_at_scheduled_time(rfm95_handle_t *handle, uint32_t scheduled_time)
 {
 	// Sleep until 1ms before the scheduled time.
 	handle->precision_sleep_until(scheduled_time - handle->precision_tick_frequency / 1000);
@@ -441,354 +295,77 @@ static void calculate_rx_timings(rfm95_handle_t *handle, uint32_t bw, uint8_t sf
 	*rx_window_symbols = rx_window_ns / symbol_rate_ns;
 }
 
-static bool receive_package(rfm95_handle_t *handle, uint32_t tx_ticks, uint8_t *payload_buf, size_t *payload_len,
-                            int8_t *snr)
-{
+bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *payload_len, int8_t *snr, UART_HandleTypeDef *uart_handle) {
 	*payload_len = 0;
 
 	uint32_t rx1_target, rx1_window_symbols;
-	calculate_rx_timings(handle, 125000, 7, tx_ticks, &rx1_target, &rx1_window_symbols);
+	//calculate_rx_timings(handle, 125000, 7, tx_ticks, &rx1_target, &rx1_window_symbols);
 
-	assert(rx1_window_symbols <= 0x3ff);
+	//Stand-by mode previous to Continuous Mode
+	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_STANDBY)) return false;
 
 	// Configure modem (125kHz, 4/6 error coding rate, SF7, single packet, CRC enable, AGC auto on)
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_1, 0x72)) return false;
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0x74 | ((rx1_window_symbols >> 8) & 0x3))) return false;
+	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0xCA)) return false;
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_3, 0x04)) return false;
+
 
 	// Set maximum symbol timeout.
 	if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, rx1_window_symbols)) return false;
 
 	// Set IQ registers according to AN1200.24.
-	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_1, RFM95_REGISTER_INVERT_IQ_1_RX)) return false;
-	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_2, RFM95_REGISTER_INVERT_IQ_2_RX)) return false;
-
-	receive_at_scheduled_time(handle, rx1_target);
-
-	// If there was nothing received during RX1, try RX2.
-	if (!wait_for_rx_irqs(handle)) {
-
-		// Return modem to sleep.
-		if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
-
-		if (handle->receive_mode == RFM95_RECEIVE_MODE_RX12) {
-
-			uint32_t rx2_target, rx2_window_symbols;
-			calculate_rx_timings(handle, 125000, 12, tx_ticks, &rx2_target, &rx2_window_symbols);
-
-			// Configure 869.525 MHz
-			if (!configure_frequency(handle, 869525000)) return false;
-
-			// Configure modem SF12
-			if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_1, 0xc2)) return false;
-			if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0x74 | ((rx2_window_symbols >> 8) & 0x3))) return false;
-			if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_3, 0x04)) return false;
-
-			// Set maximum symbol timeout.
-			if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, rx2_window_symbols)) return false;
-
-			receive_at_scheduled_time(handle, rx2_target);
-
-			if (!wait_for_rx_irqs(handle)) {
-				// No payload during in RX1 and RX2
-				return true;
-			}
-		}
-
-		return true;
-	}
-
-	uint8_t irq_flags;
-	read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irq_flags, 1);
-
-	// Check if there was a CRC error.
-	if (irq_flags & 0x20) {
-		return true;
-	}
-
-	int8_t packet_snr;
-	if (!read_register(handle, RFM95_REGISTER_PACKET_SNR, (uint8_t *)&packet_snr, 1)) return false;
-	*snr = (int8_t)(packet_snr / 4);
-
-	// Read received payload length.
-	uint8_t payload_len_internal;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_RX_BYTES_NB, &payload_len_internal, 1)) return false;
-
-	// Read received payload itself.
-	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0)) return false;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload_buf, payload_len_internal)) return false;
-
-	// Return modem to sleep.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
-
-	// Successful payload receive, set payload length to tell caller.
-	*payload_len = payload_len_internal;
-	return true;
-}
-
-static bool send_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t payload_len, uint8_t channel,
-                         uint32_t *tx_ticks)
-{
-	// Configure channel for transmission.
-	if (!configure_channel(handle, channel)) return false;
-
-	// Configure modem (125kHz, 4/6 error coding rate, SF7, single packet, CRC enable, AGC auto on)
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_1, 0x72)) return false;
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0x74)) return false;
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_3, 0x04)) return false;
-
-	// Set IQ registers according to AN1200.24.
 	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_1, RFM95_REGISTER_INVERT_IQ_1_TX)) return false;
 	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_2, RFM95_REGISTER_INVERT_IQ_2_TX)) return false;
 
-	// Set the payload length.
-	if (!write_register(handle, RFM95_REGISTER_PAYLOAD_LENGTH, payload_len)) return false;
+	// receive_at_scheduled_time(handle, rx1_target);
 
-	// Enable tx-done interrupt, clear flags and previous interrupt time.
+
 	if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_TXDONE)) return false;
 	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xff)) return false;
 	handle->interrupt_times[RFM95_INTERRUPT_DIO0] = 0;
+	handle->interrupt_times[RFM95_INTERRUPT_DIO1] = 0;
 	handle->interrupt_times[RFM95_INTERRUPT_DIO5] = 0;
 
-	// Move modem to lora standby.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_STANDBY)) return false;
 
-	// Wait for the modem to be ready.
-	wait_for_irq(handle, RFM95_INTERRUPT_DIO5, RFM95_WAKEUP_TIMEOUT);
 
-	// Set pointer to start of TX section in FIFO.
-	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0x80)) return false;
+	// Clear flags
+	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xFF)) return false;
+	read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
 
-	// Write payload to FIFO.
-	for (size_t i = 0; i < payload_len; i++) {
-		write_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload_buf[i]);
+	// Continuous Mode
+	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_RX_CONTINUOUS)) return false;
+
+	while (irqFlags == 0x00){
+		read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
+		HAL_Delay(500);
 	}
 
-	// Set modem to tx mode.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_TX)) return false;
 
-	// Wait for the transfer complete interrupt.
-	if (!wait_for_irq(handle, RFM95_INTERRUPT_DIO0, RFM95_SEND_TIMEOUT)) return false;
+	uint8_t payload[4];
 
-	// Set real tx time in ticks.
-	*tx_ticks = handle->interrupt_times[RFM95_INTERRUPT_DIO0];
+
+	// Read received payload itself.
+	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0)) return false;
+	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload, 4)) return false;
+
+	HAL_UART_Transmit(uart_handle, payload, 4, 10);
+	HAL_Delay(100);
+
+
+	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 3)) return false;
+	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload_buf, 3)) return false;
+
+	HAL_UART_Transmit(uart_handle, payload_buf, sizeof(payload_buf), 10);
+	HAL_Delay(100);
+
 
 	// Return modem to sleep.
 	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
 
-	// Increment tx frame counter.
-	handle->config.tx_frame_count++;
 
 	return true;
 }
 
-static size_t encode_phy_payload(rfm95_handle_t *handle, uint8_t payload_buf[64], const uint8_t *frame_payload,
-                                 size_t frame_payload_length, uint8_t port)
-{
-	size_t payload_len = 0;
-
-	// 64 bytes is maximum size of FIFO
-	assert(frame_payload_length + 4 + 9 <= 64);
-
-	payload_buf[0] = 0x40; // MAC Header
-	payload_buf[1] = handle->device_address[3];
-	payload_buf[2] = handle->device_address[2];
-	payload_buf[3] = handle->device_address[1];
-	payload_buf[4] = handle->device_address[0];
-	payload_buf[5] = 0x00; // Frame Control
-	payload_buf[6] = (handle->config.tx_frame_count & 0x00ffu);
-	payload_buf[7] = ((uint16_t)(handle->config.tx_frame_count >> 8u) & 0x00ffu);
-	payload_buf[8] = port; // Frame Port
-	payload_len += 9;
-
-	// Encrypt payload in place in payload_buf.
-	memcpy(payload_buf + payload_len, frame_payload, frame_payload_length);
-	if (port == 0) {
-		Encrypt_Payload(payload_buf + payload_len, frame_payload_length, handle->config.tx_frame_count,
-		                0, handle->network_session_key, handle->device_address);
-	} else {
-		Encrypt_Payload(payload_buf + payload_len, frame_payload_length, handle->config.tx_frame_count,
-		                0, handle->application_session_key, handle->device_address);
-	}
-	payload_len += frame_payload_length;
-
-	// Calculate MIC and copy to last 4 bytes of the payload_buf.
-	uint8_t mic[4];
-	Calculate_MIC(payload_buf, mic, payload_len, handle->config.tx_frame_count, 0,
-	              handle->network_session_key, handle->device_address);
-	for (uint8_t i = 0; i < 4; i++) {
-		payload_buf[payload_len + i] = mic[i];
-	}
-	payload_len += 4;
-
-	return payload_len;
-}
-
-static bool decode_phy_payload(rfm95_handle_t *handle, uint8_t payload_buf[64], uint8_t payload_length,
-                               uint8_t **decoded_frame_payload_ptr, uint8_t *decoded_frame_payload_length, uint8_t *frame_port)
-{
-	// Only unconfirmed down-links are supported for now.
-	if (payload_buf[0] != 0x60) {
-		return false;
-	}
-
-	// Does the device address match?
-	if (payload_buf[1] != handle->device_address[3] || payload_buf[2] != handle->device_address[2] ||
-	    payload_buf[3] != handle->device_address[1] || payload_buf[4] != handle->device_address[0]) {
-		return false;
-	}
-
-	uint8_t frame_control = payload_buf[5];
-	uint8_t frame_opts_length = frame_control & 0x0f;
-	uint16_t rx_frame_count = (payload_buf[7] << 8) | payload_buf[6];
-
-	// Check if rx frame count is valid and if so, update accordingly.
-	if (rx_frame_count < handle->config.rx_frame_count) {
-		return false;
-	}
-	handle->config.rx_frame_count = rx_frame_count;
-
-	uint8_t check_mic[4];
-	Calculate_MIC(payload_buf, check_mic, payload_length - 4, rx_frame_count, 1,
-	              handle->network_session_key, handle->device_address);
-	if (memcmp(check_mic, &payload_buf[payload_length - 4], 4) != 0) {
-		return false;
-	}
-
-	if (payload_length - 12 - frame_opts_length == 0) {
-		*frame_port = 0;
-		*decoded_frame_payload_ptr = &payload_buf[8];
-		*decoded_frame_payload_length = frame_opts_length;
-
-	} else {
-		*frame_port = payload_buf[8];
-
-		uint8_t frame_payload_start = 9 + frame_opts_length;
-		uint8_t frame_payload_end = payload_length - 4;
-		uint8_t frame_payload_length = frame_payload_end - frame_payload_start;
-
-		if (*frame_port == 0) {
-			Encrypt_Payload(&payload_buf[frame_payload_start], frame_payload_length, rx_frame_count,
-			                1, handle->network_session_key, handle->device_address);
-		} else {
-			Encrypt_Payload(&payload_buf[frame_payload_start], frame_payload_length, rx_frame_count,
-			                1, handle->application_session_key, handle->device_address);
-		}
-
-		*decoded_frame_payload_ptr = &payload_buf[frame_payload_start];
-		*decoded_frame_payload_length = frame_payload_length;
-	}
-
-	return true;
-}
-
-static uint8_t select_random_channel(rfm95_handle_t *handle)
-{
-	uint8_t channel_count = 0;
-
-	for (uint8_t i = 0; i < 16; i++) {
-		if (handle->config.channel_mask & (1 << i)) {
-			channel_count++;
-		}
-	}
-
-	uint8_t random_channel = handle->random_int(channel_count);
-
-	for (uint8_t i = 0; i < 16; i++) {
-		if (handle->config.channel_mask & (1 << i)) {
-			if (random_channel == 0) {
-				return i;
-			} else {
-				random_channel--;
-			}
-		}
-	}
-
-	return 0;
-}
-
-bool rfm95_send_receive_cycle(rfm95_handle_t *handle, const uint8_t *send_data, size_t send_data_length)
-{
-	uint8_t phy_payload_buf[64] = { 0 };
-
-	// Build the up-link phy payload.
-	size_t phy_payload_len = encode_phy_payload(handle, phy_payload_buf, send_data, send_data_length, 1);
-
-	uint8_t random_channel = select_random_channel(handle);
-
-	uint32_t tx_ticks;
-
-	// Send the requested up-link.
-	if (!send_package(handle, phy_payload_buf, phy_payload_len, random_channel, &tx_ticks)) {
-		write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP);
-		return false;
-	}
-
-	// Clear phy payload buffer to reuse for the down-link message.
-	memset(phy_payload_buf, 0x00, sizeof(phy_payload_buf));
-	phy_payload_len = 0;
-
-	// Only receive if configured to do so.
-	if (handle->receive_mode != RFM95_RECEIVE_MODE_NONE) {
-
-		int8_t snr;
-
-		// Try receiving a down-link.
-		if (!receive_package(handle, tx_ticks, phy_payload_buf, &phy_payload_len, &snr)) {
-			write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP);
-			if (handle->save_config) {
-				handle->save_config(&(handle->config));
-			}
-			return false;
-		}
-
-		// Any RX payload was received.
-		if (phy_payload_len != 0) {
-
-			uint8_t *frame_payload;
-			uint8_t frame_payload_len = 0;
-			uint8_t frame_port;
-
-			// Try decoding the frame payload.
-			if (decode_phy_payload(handle, phy_payload_buf, phy_payload_len, &frame_payload, &frame_payload_len,
-			                       &frame_port)) {
-
-				// Process Mac Commands
-				if (frame_port == 0) {
-
-					uint8_t mac_response_data[51] = {0};
-					uint8_t mac_response_len = 0;
-
-					if (process_mac_commands(handle, frame_payload, frame_payload_len, mac_response_data,
-					                         &mac_response_len, snr) && mac_response_len != 0) {
-
-						// Build the up-link phy payload.
-						phy_payload_len = encode_phy_payload(handle, phy_payload_buf, mac_response_data,
-						                                     mac_response_len, 0);
-
-						if (!send_package(handle, phy_payload_buf, phy_payload_len, random_channel,
-						                  &tx_ticks)) {
-							write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP);
-							if (handle->save_config) {
-								handle->save_config(&(handle->config));
-							}
-							return false;
-						}
-					}
-
-				} else {
-					// Don't process application messages for now!
-				}
-			}
-		}
-	}
-
-	if (handle->save_config) {
-		handle->save_config(&(handle->config));
-	}
-
-	return true;
-}
 
 void rfm95_on_interrupt(rfm95_handle_t *handle, rfm95_interrupt_t interrupt)
 {
