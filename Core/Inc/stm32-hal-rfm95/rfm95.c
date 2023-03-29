@@ -107,26 +107,6 @@ static bool write_register(rfm95_handle_t *handle, rfm95_register_t reg, uint8_t
 	return true;
 }
 
-static void config_set_channel(rfm95_handle_t *handle, uint8_t channel_index, uint32_t frequency)
-{
-	assert(channel_index < 16);
-	handle->config.channels[channel_index].frequency = frequency;
-	handle->config.channel_mask |= (1 << channel_index);
-}
-
-static void config_load_default(rfm95_handle_t *handle)
-{
-	handle->config.magic = RFM95_EEPROM_CONFIG_MAGIC;
-	handle->config.tx_frame_count = 0;
-	handle->config.rx_frame_count = 0;
-	handle->config.rx1_delay = 1;
-	handle->config.channel_mask = 0;
-	config_set_channel(handle, 0, 868100000);
-	config_set_channel(handle, 1, 868300000);
-	config_set_channel(handle, 2, 868500000);
-	config_set_channel(handle, 3, 867100000);
-}
-
 static void reset(rfm95_handle_t *handle)
 {
 	HAL_GPIO_WritePin(handle->nrst_port, handle->nrst_pin, GPIO_PIN_RESET);
@@ -143,25 +123,6 @@ static bool configure_frequency(rfm95_handle_t *handle, uint32_t frequency)
 	if (!write_register(handle, RFM95_REGISTER_FR_MSB, (uint8_t)(frf >> 16))) return false;
 	if (!write_register(handle, RFM95_REGISTER_FR_MID, (uint8_t)(frf >> 8))) return false;
 	if (!write_register(handle, RFM95_REGISTER_FR_LSB, (uint8_t)(frf >> 0))) return false;
-
-	return true;
-}
-
-static bool configure_channel(rfm95_handle_t *handle, size_t channel_index)
-{
-	assert(handle->config.channel_mask & (1 << channel_index));
-	return configure_frequency(handle, handle->config.channels[channel_index].frequency);
-}
-
-static bool wait_for_irq(rfm95_handle_t *handle, rfm95_interrupt_t interrupt, uint32_t timeout_ms)
-{
-	uint32_t timeout_tick = handle->get_precision_tick() + timeout_ms * handle->precision_tick_frequency / 1000;
-
-	while (handle->interrupt_times[interrupt] == 0) {
-		if (handle->get_precision_tick() >= timeout_tick) {
-			return false;
-		}
-	}
 
 	return true;
 }
@@ -205,17 +166,10 @@ bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 
 
 
-	// If there is reload function or the reload was unsuccessful or the magic does not match restore default.
-	if (handle->reload_config == NULL || !handle->reload_config(&handle->config) ||
-	    handle->config.magic != RFM95_EEPROM_CONFIG_MAGIC) {
-		config_load_default(handle);
-	}
 
 	// Check for correct version.
 	uint8_t version;
 	if (!read_register(handle, RFM95_REGISTER_VERSION, &version, 1)) return false;
-	HAL_UART_Transmit(uart_handle, version, sizeof(version), 10);
-	HAL_Delay(100);
 	if (version != RFM9x_VER) return false;
 
 
@@ -250,55 +204,19 @@ bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 	// Maximum payload length of the RFM95 is 64.
 	if (!write_register(handle, RFM95_REGISTER_MAX_PAYLOAD_LENGTH, 64)) return false;
 
+	if(!configure_frequency(handle, 868100000)) return false;
+
 	// Let module sleep after initialisation.
 	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
 
 	return true;
 }
 
-bool receive_at_scheduled_time(rfm95_handle_t *handle, uint32_t scheduled_time)
-{
-	// Sleep until 1ms before the scheduled time.
-	handle->precision_sleep_until(scheduled_time - handle->precision_tick_frequency / 1000);
-
-	// Clear flags and previous interrupt time, configure mapping for RX done.
-	if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_RXDONE)) return false;
-	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xff)) return false;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO0] = 0;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO1] = 0;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO5] = 0;
-
-	// Move modem to lora standby.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_STANDBY)) return false;
-
-	// Wait for the modem to be ready.
-	wait_for_irq(handle, RFM95_INTERRUPT_DIO5, RFM95_WAKEUP_TIMEOUT);
-
-	// Now sleep until the real scheduled time.
-	handle->precision_sleep_until(scheduled_time);
-
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_RX_SINGLE)) return false;
-
-	return true;
-}
-
-static void calculate_rx_timings(rfm95_handle_t *handle, uint32_t bw, uint8_t sf, uint32_t tx_ticks,
-                                 uint32_t *rx_target, uint32_t *rx_window_symbols)
-{
-	volatile int32_t symbol_rate_ns = (int32_t)(((2 << (sf - 1)) * 1000000) / bw);
-
-	volatile int32_t rx_timing_error_ns = (int32_t)(handle->precision_tick_drift_ns_per_s * handle->config.rx1_delay);
-	volatile int32_t rx_window_ns = 2 * symbol_rate_ns + 2 * rx_timing_error_ns;
-	volatile int32_t rx_offset_ns = 4 * symbol_rate_ns - (rx_timing_error_ns / 2);
-	volatile int32_t rx_offset_ticks = (int32_t)(((int64_t)rx_offset_ns * (int64_t)handle->precision_tick_frequency) / 1000000);
-	*rx_target = tx_ticks + handle->precision_tick_frequency * handle->config.rx1_delay + rx_offset_ticks;
-	*rx_window_symbols = rx_window_ns / symbol_rate_ns;
-}
 
 bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *payload_len, int8_t *snr, UART_HandleTypeDef *uart_handle) {
 	*payload_len = 0;
 
-	uint32_t rx1_target, rx1_window_symbols;
+	//uint32_t rx1_target, rx1_window_symbols;
 	//calculate_rx_timings(handle, 125000, 7, tx_ticks, &rx1_target, &rx1_window_symbols);
 
 	//Stand-by mode previous to Continuous Mode
@@ -306,12 +224,12 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 
 	// Configure modem (125kHz, 4/6 error coding rate, SF7, single packet, CRC enable, AGC auto on)
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_1, 0x72)) return false;
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0xCA)) return false;
+	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0xC2)) return false;
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_3, 0x04)) return false;
 
 
 	// Set maximum symbol timeout.
-	if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, rx1_window_symbols)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, rx1_window_symbols)) return false;
 
 	// Set IQ registers according to AN1200.24.
 	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_1, RFM95_REGISTER_INVERT_IQ_1_TX)) return false;
@@ -320,7 +238,7 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 	// receive_at_scheduled_time(handle, rx1_target);
 
 
-	if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_TXDONE)) return false;
+	if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_RXDONE)) return false;
 	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xff)) return false;
 	handle->interrupt_times[RFM95_INTERRUPT_DIO0] = 0;
 	handle->interrupt_times[RFM95_INTERRUPT_DIO1] = 0;
@@ -341,21 +259,17 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 	}
 
 
-	uint8_t payload[4];
+	 // Read received payload length.
+	uint8_t payload_len_internal;
+	if (!read_register(handle, RFM95_REGISTER_FIFO_RX_BYTES_NB, &payload_len_internal, 1)) return false;
 
+	uint8_t payload[payload_len_internal];
 
-	// Read received payload itself.
+	 // Read received payload itself.
 	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0)) return false;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload, 4)) return false;
+	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload, payload_len_internal)) return false;
 
-	HAL_UART_Transmit(uart_handle, payload, 4, 10);
-	HAL_Delay(100);
-
-
-	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 3)) return false;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload_buf, 3)) return false;
-
-	HAL_UART_Transmit(uart_handle, payload_buf, sizeof(payload_buf), 10);
+	HAL_UART_Transmit(uart_handle, payload, payload_len_internal, 10);
 	HAL_Delay(100);
 
 

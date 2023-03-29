@@ -144,9 +144,6 @@ int main(void)
 
 	if(receive_package(&rfm95_handle, &payloadBuff, &payload_len, 0, &huart2)) {
 		//HAL_UART_Transmit(&huart2, payloadBuff, sizeof(payloadBuff), 10);
-
-		HAL_UART_Transmit(&huart2, "\nhere2\n", 7, 10);
-		HAL_Delay(100);
 	}
     /* USER CODE END WHILE */
 
