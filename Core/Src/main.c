@@ -133,17 +133,19 @@ int main(void)
 	  HAL_Delay(1000);
   }
 
+  uint8_t payloadBuff;
+  size_t payload_len;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	uint8_t payloadBuff;
-	size_t payload_len;
+
 
 	if(receive_package(&rfm95_handle, &payloadBuff, &payload_len, 0, &huart2)) {
-		//HAL_UART_Transmit(&huart2, payloadBuff, sizeof(payloadBuff), 10);
+		HAL_UART_Transmit(&huart2, payloadBuff, sizeof(payloadBuff), 10);
 	}
     /* USER CODE END WHILE */
 

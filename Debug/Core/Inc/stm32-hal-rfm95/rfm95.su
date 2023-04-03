@@ -1,8 +1,8 @@
-../Core/Inc/stm32-hal-rfm95/rfm95.c:76:13:read_register	40	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:95:13:write_register	24	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:110:13:reset	16	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:118:13:configure_frequency	48	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:130:6:rfm95_set_power	32	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:156:6:rfm95_init	24	static
-../Core/Inc/stm32-hal-rfm95/rfm95.c:216:6:receive_package	80	dynamic
-../Core/Inc/stm32-hal-rfm95/rfm95.c:284:6:rfm95_on_interrupt	24	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:75:13:read_register	40	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:94:13:write_register	24	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:109:13:reset	16	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:117:13:configure_frequency	48	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:129:6:rfm95_set_power	32	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:155:6:rfm95_init	24	static
+../Core/Inc/stm32-hal-rfm95/rfm95.c:215:6:receive_package	80	dynamic
+../Core/Inc/stm32-hal-rfm95/rfm95.c:286:6:rfm95_on_interrupt	24	static

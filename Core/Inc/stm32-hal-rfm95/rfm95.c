@@ -6,8 +6,6 @@
 
 #define RFM9x_VER 0x12
 
-uint8_t irqFlags;
-
 /**
  * Registers addresses.
  */
@@ -23,6 +21,7 @@ typedef enum
 	RFM95_REGISTER_FIFO_ADDR_PTR = 0x0D,
 	RFM95_REGISTER_FIFO_TX_BASE_ADDR = 0x0E,
 	RFM95_REGISTER_FIFO_RX_BASE_ADDR = 0x0F,
+	RFM95_REGISTER_FIFO_RX_CURRENT_ADDR = 0x10,
 	RFM95_REGISTER_IRQ_FLAGS = 0x12,
 	RFM95_REGISTER_FIFO_RX_BYTES_NB = 0x13,
 	RFM95_REGISTER_PACKET_SNR = 0x19,
@@ -216,8 +215,6 @@ bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *payload_len, int8_t *snr, UART_HandleTypeDef *uart_handle) {
 	*payload_len = 0;
 
-	//uint32_t rx1_target, rx1_window_symbols;
-	//calculate_rx_timings(handle, 125000, 7, tx_ticks, &rx1_target, &rx1_window_symbols);
 
 	//Stand-by mode previous to Continuous Mode
 	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_STANDBY)) return false;
@@ -229,7 +226,7 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 
 
 	// Set maximum symbol timeout.
-	//if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, rx1_window_symbols)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_SYMB_TIMEOUT_LSB, 16)) return false;
 
 	// Set IQ registers according to AN1200.24.
 	if (!write_register(handle, RFM95_REGISTER_INVERT_IQ_1, RFM95_REGISTER_INVERT_IQ_1_TX)) return false;
@@ -247,23 +244,29 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 
 
 	// Clear flags
-	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xFF)) return false;
-	read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
+	uint8_t irqFlags;
 
 	// Continuous Mode
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_RX_CONTINUOUS)) return false;
+	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_RX_SINGLE)) return false;
 
-	while (irqFlags == 0x00){
-		read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
-		HAL_Delay(500);
+
+	while ((irqFlags != 0x50)) { // wait for RxDone
+	  HAL_Delay(10);
+	  read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1); // read after the delay, not before
+
+	  HAL_UART_Transmit(uart_handle, irqFlags, sizeof(irqFlags), 10);
+
+	  if (irqFlags & 0xA0) return false; // cancel on PayloadCrcError and RxTimeout
 	}
 
+	HAL_UART_Transmit(uart_handle, irqFlags, sizeof(irqFlags), 10);
 
 	 // Read received payload length.
 	uint8_t payload_len_internal;
 	if (!read_register(handle, RFM95_REGISTER_FIFO_RX_BYTES_NB, &payload_len_internal, 1)) return false;
 
 	uint8_t payload[payload_len_internal];
+
 
 	 // Read received payload itself.
 	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0)) return false;
@@ -279,7 +282,6 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 
 	return true;
 }
-
 
 void rfm95_on_interrupt(rfm95_handle_t *handle, rfm95_interrupt_t interrupt)
 {
