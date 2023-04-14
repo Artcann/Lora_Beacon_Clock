@@ -133,8 +133,8 @@ int main(void)
 	  HAL_Delay(1000);
   }
 
-  uint8_t payloadBuff;
-  size_t payload_len;
+  uint8_t payloadBuff = 0;
+  size_t payload_len = 0;
 
   /* USER CODE END 2 */
 
@@ -143,10 +143,13 @@ int main(void)
   while (1)
   {
 
-
 	if(receive_package(&rfm95_handle, &payloadBuff, &payload_len, 0, &huart2)) {
-		HAL_UART_Transmit(&huart2, payloadBuff, sizeof(payloadBuff), 10);
+		uint8_t* message = "here2";
+		HAL_UART_Transmit(&huart2, message, 5, 10);
 	}
+
+	payloadBuff = 0;
+	payload_len = 0;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

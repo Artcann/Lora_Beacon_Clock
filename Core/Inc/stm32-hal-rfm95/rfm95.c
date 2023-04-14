@@ -6,6 +6,8 @@
 
 #define RFM9x_VER 0x12
 
+uint8_t irqFlags;
+
 /**
  * Registers addresses.
  */
@@ -190,8 +192,8 @@ bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 	if (!write_register(handle, RFM95_REGISTER_LNA, 0x23)) return false;
 
 	// Preamble set to 8 + 4.25 = 12.25 symbols.
-	if (!write_register(handle, RFM95_REGISTER_PREAMBLE_MSB, 0x00)) return false;
-	if (!write_register(handle, RFM95_REGISTER_PREAMBLE_LSB, 0x08)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_PREAMBLE_MSB, 0x00)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_PREAMBLE_LSB, 0x08)) return false;
 
 	// Set TTN sync word 0x34.
 	if (!write_register(handle, RFM95_REGISTER_SYNC_WORD, 0x34)) return false;
@@ -201,12 +203,12 @@ bool rfm95_init(rfm95_handle_t *handle, UART_HandleTypeDef *uart_handle)
 	if (!write_register(handle, RFM95_REGISTER_FIFO_RX_BASE_ADDR, 0x00)) return false;
 
 	// Maximum payload length of the RFM95 is 64.
-	if (!write_register(handle, RFM95_REGISTER_MAX_PAYLOAD_LENGTH, 64)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_MAX_PAYLOAD_LENGTH, 64)) return false;
 
 	if(!configure_frequency(handle, 868100000)) return false;
 
 	// Let module sleep after initialisation.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
+	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_STANDBY)) return false;
 
 	return true;
 }
@@ -221,7 +223,7 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 
 	// Configure modem (125kHz, 4/6 error coding rate, SF7, single packet, CRC enable, AGC auto on)
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_1, 0x72)) return false;
-	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0xC2)) return false;
+	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_2, 0xC4)) return false;
 	if (!write_register(handle, RFM95_REGISTER_MODEM_CONFIG_3, 0x04)) return false;
 
 
@@ -235,49 +237,51 @@ bool receive_package(rfm95_handle_t *handle, uint8_t *payload_buf, size_t *paylo
 	// receive_at_scheduled_time(handle, rx1_target);
 
 
-	if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_RXDONE)) return false;
+	//if (!write_register(handle, RFM95_REGISTER_DIO_MAPPING_1, RFM95_REGISTER_DIO_MAPPING_1_IRQ_FOR_RXDONE)) return false;
 	if (!write_register(handle, RFM95_REGISTER_IRQ_FLAGS, 0xff)) return false;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO0] = 0;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO1] = 0;
-	handle->interrupt_times[RFM95_INTERRUPT_DIO5] = 0;
-
-
-
-	// Clear flags
-	uint8_t irqFlags;
+	read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
 
 	// Continuous Mode
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_RX_SINGLE)) return false;
+	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_RX_CONTINUOUS)) return false;
+
+	HAL_UART_Transmit(uart_handle, "here1", 5, 10);
 
 
-	while ((irqFlags != 0x50)) { // wait for RxDone
-	  HAL_Delay(10);
-	  read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1); // read after the delay, not before
+	while (!(irqFlags & 0x40)){
+		HAL_Delay(10);
+		read_register(handle, RFM95_REGISTER_IRQ_FLAGS, &irqFlags, 1);
 
-	  HAL_UART_Transmit(uart_handle, irqFlags, sizeof(irqFlags), 10);
-
-	  if (irqFlags & 0xA0) return false; // cancel on PayloadCrcError and RxTimeout
+		if(irqFlags & 0xA0) return false;
 	}
 
-	HAL_UART_Transmit(uart_handle, irqFlags, sizeof(irqFlags), 10);
-
-	 // Read received payload length.
-	uint8_t payload_len_internal;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_RX_BYTES_NB, &payload_len_internal, 1)) return false;
-
-	uint8_t payload[payload_len_internal];
+	HAL_UART_Transmit(uart_handle, &irqFlags, 1, 10);
 
 
-	 // Read received payload itself.
-	if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, 0)) return false;
-	if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload, payload_len_internal)) return false;
 
-	HAL_UART_Transmit(uart_handle, payload, payload_len_internal, 10);
-	HAL_Delay(100);
+	if(irqFlags & 0x40) {
+
+		 // Read received payload length.
+		uint8_t payload_len_internal;
+		if (!read_register(handle, RFM95_REGISTER_FIFO_RX_BYTES_NB, &payload_len_internal, 1)) return false;
+
+		uint8_t payload[payload_len_internal];
 
 
-	// Return modem to sleep.
-	if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
+		// Read received payload itself.
+		uint8_t fifoAddr;
+		if (!read_register(handle, RFM95_REGISTER_FIFO_RX_CURRENT_ADDR, &fifoAddr, 1)) return false;
+		if (!write_register(handle, RFM95_REGISTER_FIFO_ADDR_PTR, fifoAddr)) return false;
+
+		if (!read_register(handle, RFM95_REGISTER_FIFO_ACCESS, payload, payload_len_internal)) return false;
+
+		HAL_UART_Transmit(uart_handle, payload, payload_len_internal, 10);
+		HAL_Delay(100);
+
+
+		// Return modem to sleep.
+		if (!write_register(handle, RFM95_REGISTER_OP_MODE, RFM95_REGISTER_OP_MODE_LORA_SLEEP)) return false;
+
+	}
 
 
 	return true;
